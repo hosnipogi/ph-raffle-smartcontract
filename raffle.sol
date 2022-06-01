@@ -1,28 +1,55 @@
 //SPDX-License-Identifier: GPL-3.0
  
-pragma solidity >=0.5.0 <0.9.0;
+pragma solidity >=0.7.0 <0.9.0;
  
+enum State {
+    ACTIVE,
+    INACTIVE
+}
+
+struct allPlayersFromSpecificGame {
+    address [] allAddress;
+    mapping( address => uint[]) playersWithSlotsTaken;
+}
+
 contract Raffle {
     uint public entranceFee;
-    uint adminFee; // 10% fee
+    uint adminFee; 
 
-    address payable[100] players; // max players;
+    address payable[6] players; // max players;
     address payable admin;
     address genesis = 0x0000000000000000000000000000000000000000;
 
     uint public pricePool;
+    uint public amountToRefund;
+
+    State public gameState;
 
     event ReadyToDrawRaffle(uint indexed numPlayers, uint pricePool);
     event RaffleWinner(address indexed winner, uint winnings);
     event NewPlayer(address indexed player, uint[] indexed slotsTaken, uint indexed totalActivePlayers);
 
+    bytes32 public gameId;
+    mapping(bytes32 => allPlayersFromSpecificGame) Game;
+
     constructor() {
-        entranceFee = 600000000000000;
-        adminFee = entranceFee / 10;
+        entranceFee = 1000000000000000000;
+        adminFee = entranceFee / 10; // 10% admin fee
         admin = payable(msg.sender);
+        gameState = State.ACTIVE;
+
+        gameId = keccak256(abi.encodePacked(block.timestamp));
+        Game[gameId];
     }
 
-    function playerSelectMultipleSlots(uint[] memory indexes) external payable returns(bool success) {
+    /****************************** GAME LOGIC *******************************/
+
+    modifier gameIsActive {
+        require(gameState == State.ACTIVE, "Game is temporarily suspended");
+        _;
+    }
+
+    function playerSelectMultipleSlots(uint[] memory indexes) external payable gameIsActive returns(bool success) {
         require(msg.value == entranceFee * indexes.length, "Please input the exact amount to proceed");
         
         for (uint i; i<indexes.length; i++) {
@@ -32,6 +59,12 @@ contract Raffle {
             players[current] = payable(msg.sender);
         }
         
+        // Game[gameId].allAddress.push(msg.sender);
+        // uint[] storage arr = Game[gameId].playersWithSlotsTaken[msg.sender];
+        // for(uint i; i<indexes.length; i++) {
+        //     arr.push(indexes[i]);
+        // }
+
         uint lessFees = (msg.value * (entranceFee - adminFee)) / entranceFee;
         pricePool += lessFees;
         
@@ -68,6 +101,15 @@ contract Raffle {
         reset();
     }
 
+    function playerForceDrawRaffle() external payable gameIsActive {
+        uint feesRequired = exactFeeRequiredToClose();
+        require(msg.value >= feesRequired, "Not enough fees");
+        
+        drawRaffle();
+    }
+
+    /****************************** UTILS *******************************/
+
     function tempRandom() private view returns(uint, uint, uint[] memory) {
         (uint activePlayers,uint[] memory selectedSlots) = getNumPlayers();
         bytes memory encodedBytes = abi.encodePacked(block.difficulty, block.timestamp, activePlayers);
@@ -94,13 +136,6 @@ contract Raffle {
         return (activePlayers, allAvailSlotsOnly);
     }
 
-    function playerForceDrawRaffle() external payable {
-        uint feesRequired = exactFeeRequiredToClose();
-        require(msg.value >= feesRequired, "Not enough fees");
-        
-        drawRaffle();
-    }
-
     function exactFeeRequiredToClose() public view returns(uint) {
         (uint activePlayers,) = getNumPlayers();
 
@@ -113,12 +148,14 @@ contract Raffle {
         delete players;
     }
 
+    /****************************** ADMIN FUNCTIONS *******************************/
+
     modifier isAdmin() {
         require(msg.sender == admin, "admin access required");
         _;
     }
 
-    function getContractBalance() private view returns(uint) {
+    function getContractBalance() public view returns(uint) {
         return address(this).balance;
     }
 
@@ -134,12 +171,72 @@ contract Raffle {
         adminFee = amount / 10;
     }
 
-    function getPlayersArray() external view isAdmin returns(address[] memory){
+    function adminGetPlayersArray() public view isAdmin returns(address[] memory) {
         address[] memory playersArray = new address[](players.length);
         for (uint i; i < players.length; i++) {
             playersArray[i] = players[i];
         }
         return playersArray;
+    }
+
+    function adminAbortAndRefund() payable public isAdmin returns(bool, uint) {
+        (uint activePlayers,) = getNumPlayers();
+        require(activePlayers > 0, "No players, aborting..");
+
+        address[] memory activePlayersArray = adminGetPlayersArray();
+        for (uint i; i < activePlayersArray.length; i++) {
+            address currentAddress = activePlayersArray[i];
+
+            if (currentAddress != genesis) {
+                uint numEntries;
+                for (uint j; j < activePlayersArray.length; j++) { // check for multiple entries of the same address
+                    if (currentAddress == activePlayersArray[j]) {
+                        numEntries++;
+                    }
+                }
+
+
+                if (numEntries > 0) {
+                    amountToRefund = entranceFee * numEntries;
+
+                    require(getContractBalance() >= amountToRefund, "Not enough balance to refund");
+                    adminSendTo(payable(currentAddress), amountToRefund);
+                    // (bool success,) = currentAddress.call{
+                    //     value: amountToRefund
+                    // }("");
+
+                    // require(success == true, "Error in sending");
+                    // refunded += 1;
+                }
+            }
+            
+        }
+
+        reset();
+        // success = true;
+        // refunded = 1;
+
+        return (true, 1);
+    }
+
+    function adminSendTo(address payable _to, uint amount) private isAdmin returns(bool success) {
+        _to.transfer(amount);
+        success = true;
+    }
+
+    function adminSuspendGame(bool refundAndRestartGame) external isAdmin returns(bool, uint) {
+        gameState = State.INACTIVE;
+
+        if (refundAndRestartGame) {
+            return adminAbortAndRefund();
+        }
+
+        return (true, 0);
+    }
+
+    function adminResumeGame() external isAdmin returns(bool success) {
+        gameState = State.ACTIVE;
+        success = true;
     }
 
 }
